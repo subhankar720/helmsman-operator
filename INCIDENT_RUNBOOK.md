@@ -1537,6 +1537,39 @@ Because the ClusterRole didn't exist, the operator's service account had **zero 
 5. **Add startup health checks:**
    The operator should fail fast with a clear error message if it cannot list required resources, rather than timing out after 2+ minutes.
 
+6. **Local development workflow for testing fixes:**
+   ```bash
+   # Build and test locally without pushing to GHCR
+   cd /home/subhankar/projects/helmsman/helmsman-operator
+   docker build -t helmsman-operator:dev -f Dockerfile .
+   kind load docker-image helmsman-operator:dev --name helmsman-onprem
+   kind load docker-image helmsman-operator:dev --name helmsman-hub
+   
+   # Update deployments to use local image
+   kubectl set image deployment/helmsman-operator \
+     -n helmsman-operator manager=helmsman-operator:dev \
+     --context kind-helmsman-onprem
+   kubectl set image deployment/helmsman-operator-controller-manager \
+     -n helmsman-operator-system manager=helmsman-operator:dev \
+     --context kind-helmsman-hub
+   
+   # Set imagePullPolicy to Never
+   kubectl patch deployment helmsman-operator -n helmsman-operator \
+     --context kind-helmsman-onprem \
+     --type='json' \
+     -p='[{"op": "add", "path": "/spec/template/spec/containers/0/imagePullPolicy", "value": "Never"}]'
+   kubectl patch deployment helmsman-operator-controller-manager -n helmsman-operator-system \
+     --context kind-helmsman-hub \
+     --type='json' \
+     -p='[{"op": "add", "path": "/spec/template/spec/containers/0/imagePullPolicy", "value": "Never"}]'
+   
+   # Wait for rollout and verify
+   kubectl rollout status deployment/helmsman-operator -n helmsman-operator \
+     --context kind-helmsman-onprem --timeout=120s
+   kubectl rollout status deployment/helmsman-operator-controller-manager \
+     -n helmsman-operator-system --context kind-helmsman-hub --timeout=120s
+   ```
+
 ---
 
 ## Hub Cluster Setup Checklist

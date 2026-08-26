@@ -270,6 +270,86 @@ kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=helmsman-operat
   -n helmsman-operator-system --context kind-helmsman-hub --timeout=120s
 ```
 
+### 3a. Local Development Workflow (Docker Build + Kind Load)
+
+When developing operator changes, use this workflow to test locally without pushing to GHCR:
+
+```bash
+# 1. Build the operator image locally
+cd /home/subhankar/projects/helmsman/helmsman-operator
+docker build -t helmsman-operator:dev \
+  --build-arg TARGETOS=linux \
+  --build-arg TARGETARCH=amd64 \
+  -f Dockerfile .
+
+# 2. Load the image into both Kind clusters
+kind load docker-image helmsman-operator:dev --name helmsman-onprem
+kind load docker-image helmsman-operator:dev --name helmsman-hub
+
+# 3. Update operator deployments to use the local image
+kubectl set image deployment/helmsman-operator \
+  -n helmsman-operator \
+  manager=helmsman-operator:dev \
+  --context kind-helmsman-onprem
+
+kubectl set image deployment/helmsman-operator-controller-manager \
+  -n helmsman-operator-system \
+  manager=helmsman-operator:dev \
+  --context kind-helmsman-hub
+
+# 4. Set imagePullPolicy to Never to prevent pulling from registry
+kubectl patch deployment helmsman-operator -n helmsman-operator \
+  --context kind-helmsman-onprem \
+  --type='json' \
+  -p='[{"op": "add", "path": "/spec/template/spec/containers/0/imagePullPolicy", "value": "Never"}]'
+
+kubectl patch deployment helmsman-operator-controller-manager -n helmsman-operator-system \
+  --context kind-helmsman-hub \
+  --type='json' \
+  -p='[{"op": "add", "path": "/spec/template/spec/containers/0/imagePullPolicy", "value": "Never"}]'
+
+# 5. Wait for rollout
+kubectl rollout status deployment/helmsman-operator -n helmsman-operator \
+  --context kind-helmsman-onprem --timeout=120s
+
+kubectl rollout status deployment/helmsman-operator-controller-manager -n helmsman-operator-system \
+  --context kind-helmsman-hub --timeout=120s
+
+# 6. Verify the new image is running
+kubectl get pods -n helmsman-operator --context kind-helmsman-onprem
+kubectl get pods -n helmsman-operator-system --context kind-helmsman-hub
+
+# 7. Check logs to confirm changes
+kubectl logs -n helmsman-operator deployment/helmsman-operator \
+  --context kind-helmsman-onprem --tail=20
+```
+
+**Important Notes:**
+- The `imagePullPolicy: Never` is critical — without it, Kubernetes will try to pull `helmsman-operator:dev` from Docker Hub and fail
+- When you're done testing, revert to the published image:
+  ```bash
+  kubectl set image deployment/helmsman-operator \
+    -n helmsman-operator \
+    manager=ghcr.io/subhankar720/helmsman-operator:latest \
+    --context kind-helmsman-onprem
+  
+  kubectl set image deployment/helmsman-operator-controller-manager \
+    -n helmsman-operator-system \
+    manager=ghcr.io/subhankar720/helmsman-operator:latest \
+    --context kind-helmsman-hub
+  
+  # Remove imagePullPolicy override
+  kubectl patch deployment helmsman-operator -n helmsman-operator \
+    --context kind-helmsman-onprem \
+    --type='json' \
+    -p='[{"op": "remove", "path": "/spec/template/spec/containers/0/imagePullPolicy"}]'
+  
+  kubectl patch deployment helmsman-operator-controller-manager -n helmsman-operator-system \
+    --context kind-helmsman-hub \
+    --type='json' \
+    -p='[{"op": "remove", "path": "/spec/template/spec/containers/0/imagePullPolicy"}]'
+  ```
+
 ### 4. Fix RBAC Permissions
 
 The default ClusterRole may be missing permissions. Add them:
