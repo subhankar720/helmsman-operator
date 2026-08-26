@@ -71,6 +71,28 @@ type OIDCCredentials struct {
 	CookieSecret string
 }
 
+// keycloakClientListItem represents a Keycloak client with just the ID field.
+type keycloakClientListItem struct {
+	ID string `json:"id"`
+}
+
+// decodeKeycloakClientList decodes the Keycloak Admin API /clients response.
+// The endpoint can return either a JSON array or a single object when there is
+// exactly one match, so we handle both shapes here.
+func decodeKeycloakClientList(data []byte) ([]keycloakClientListItem, error) {
+	// Try array first
+	var asArray []keycloakClientListItem
+	if err := json.Unmarshal(data, &asArray); err == nil {
+		return asArray, nil
+	}
+	// Try single object
+	var asObject keycloakClientListItem
+	if err := json.Unmarshal(data, &asObject); err != nil {
+		return nil, err
+	}
+	return []keycloakClientListItem{asObject}, nil
+}
+
 // registerKeycloakClient ensures the client exists and returns full credentials.
 func registerKeycloakClient(ctx context.Context, appName string, cfg *platformConfig) (*OIDCCredentials, error) {
 	token, err := getKeycloakAdminToken(cfg)
@@ -88,10 +110,13 @@ func registerKeycloakClient(ctx context.Context, appName string, cfg *platformCo
 	}
 	defer resp.Body.Close()
 
-	var clients []struct {
-		ID string `json:"id"`
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read client list response: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&clients); err != nil {
+
+	clients, err := decodeKeycloakClientList(body)
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode client list: %w", err)
 	}
 
@@ -222,10 +247,12 @@ func deleteKeycloakClient(ctx context.Context, appName string, cfg *platformConf
 		return err
 	}
 	defer resp.Body.Close()
-	var clients []struct {
-		ID string `json:"id"`
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&clients); err != nil {
+	clients, err := decodeKeycloakClientList(body)
+	if err != nil {
 		return err
 	}
 	if len(clients) == 0 {

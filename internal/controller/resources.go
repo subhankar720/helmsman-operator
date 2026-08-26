@@ -129,7 +129,49 @@ func (r *AppDeploymentReconciler) ensureNetworkPolicies(ctx context.Context, app
 		},
 	}
 
-	for _, np := range []*networkingv1.NetworkPolicy{denyAll, allowIngress, allowDNS} {
+	// Policy 4: Allow egress to Keycloak (port 80)
+	keycloakPort := intstr.FromInt32(80)
+	allowKeycloakEgress := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      appDep.Spec.AppName + "-allow-keycloak-egress",
+			Namespace: appDep.Namespace,
+			Labels:    labels,
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: selector,
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Port: &keycloakPort, Protocol: &tcpProto},
+					},
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+
+	// Policy 5: Allow egress to Vault (port 8200)
+	vaultPort := intstr.FromInt32(8200)
+	allowVaultEgress := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      appDep.Spec.AppName + "-allow-vault-egress",
+			Namespace: appDep.Namespace,
+			Labels:    labels,
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: selector,
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Port: &vaultPort, Protocol: &tcpProto},
+					},
+				},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+
+	for _, np := range []*networkingv1.NetworkPolicy{denyAll, allowIngress, allowDNS, allowKeycloakEgress, allowVaultEgress} {
 		if err := controllerutil.SetControllerReference(appDep, np, r.Scheme); err != nil {
 			return err
 		}

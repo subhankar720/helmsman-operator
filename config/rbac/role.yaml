@@ -7,14 +7,7 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
+  - configmaps
   - serviceaccounts
   - services
   verbs:
@@ -24,6 +17,22 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - apps
