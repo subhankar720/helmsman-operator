@@ -2,7 +2,11 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -23,17 +27,12 @@ import (
 )
 
 // finalizerName is the finalizer we place on every AppDeployment.
-// When a CR is deleted, the controller runs cleanup (Keycloak client deletion)
-// before allowing Kubernetes to garbage-collect the CR itself.
 const finalizerName = "platform.helmsman.dev/finalizer"
 
 // platformConfigSecretName is the Secret the operator reads for Keycloak/Vault URLs.
-// Must be created in each app namespace (same as helmsman-platform-config).
 const platformConfigSecretName = "helmsman-platform-config"
 
 // AppDeploymentReconciler reconciles AppDeployment objects.
-// It holds a Kubernetes client (to create/update/delete resources)
-// and the scheme (to convert between Go types and Kubernetes API objects).
 type AppDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -50,64 +49,44 @@ type platformConfig struct {
 	VaultToken        string
 }
 
-// RBAC markers — kubebuilder reads these and generates the ClusterRole YAML.
-// Every resource the operator creates or reads needs a corresponding marker.
-//
 //+kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=external-secrets.io,resources=externalsecrets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 
-// Reconcile is called by controller-runtime whenever:
-// - An AppDeployment CR is created, updated, or deleted
-// - A resource owned by an AppDeployment changes (via ownership references)
-// - The requeue timer fires after a previous error
-//
-// The function must be idempotent — it may be called many times for the
-// same desired state, and the result must always be the same.
 func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Reconciling AppDeployment", "name", req.Name, "namespace", req.Namespace)
 
 	// ── Step 1: Fetch the AppDeployment CR ───────────────────────────────────
-	// If it doesn't exist (e.g. already deleted), IgnoreNotFound returns nil
-	// so we don't return an error and requeue unnecessarily.
 	var appDep platformv1alpha1.AppDeployment
 	if err := r.Get(ctx, req.NamespacedName, &appDep); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// ── Step 2: Handle deletion ───────────────────────────────────────────────
-	// DeletionTimestamp is set by Kubernetes when someone deletes the CR.
-	// We must process our finalizer before the CR can be fully removed.
 	if !appDep.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, &appDep)
 	}
 
 	// ── Step 3: Add finalizer if not present ──────────────────────────────────
-	// The finalizer prevents Kubernetes from deleting the CR until we've
-	// completed our cleanup (Keycloak client deletion).
 	if !controllerutil.ContainsFinalizer(&appDep, finalizerName) {
 		logger.Info("Adding finalizer", "finalizer", finalizerName)
 		controllerutil.AddFinalizer(&appDep, finalizerName)
 		if err := r.Update(ctx, &appDep); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
 		}
-		// Requeue so we continue reconciliation with the updated object
 		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// ── Step 4: Read platform configuration ──────────────────────────────────
-	// The operator needs to know where Keycloak and Vault are.
-	// This information lives in the helmsman-platform-config Secret
-	// in the same namespace as the AppDeployment.
 	cfg, err := r.getPlatformConfig(ctx, appDep.Namespace)
 	if err != nil {
 		logger.Error(err, "Failed to read platform config")
@@ -118,9 +97,6 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// ── Step 5: Register OIDC client (if enabled) ─────────────────────────────
-	// This mirrors what the PreSync Job does, but now owned by the controller.
-	// The controller retries on failure (RequeueAfter) rather than failing the
-	// entire deployment like a failed Job would.
 	if appDep.Spec.OIDC.Enabled {
 		creds, err := registerKeycloakClient(ctx, appDep.Spec.AppName, cfg)
 		if err != nil {
@@ -130,7 +106,8 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			_ = r.Status().Update(ctx, &appDep)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-		// Write credentials to Vault — ESO syncs them into the K8s Secret
+
+		// Write credentials to Vault
 		if err := writeOIDCCredsToVault(ctx, appDep.Spec.AppName, creds, cfg); err != nil {
 			logger.Error(err, "Failed to write OIDC credentials to Vault")
 			r.setCondition(&appDep, platformv1alpha1.ConditionOIDCRegistered,
@@ -165,19 +142,12 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
-	// ── Step 10: Ensure ExternalSecret (OIDC credentials from Vault) ───────────
-	if appDep.Spec.OIDC.Enabled {
-		if err := r.ensureExternalSecret(ctx, &appDep); err != nil {
-			return ctrl.Result{RequeueAfter: 15 * time.Second}, err
-		}
-	}
-
-	// ── Step 11: Ensure StatefulSet ───────────────────────────────────────────
+	// ── Step 10: Ensure StatefulSet ───────────────────────────────────────────
 	if err := r.ensureStatefulSet(ctx, &appDep); err != nil {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
-	// ── Step 11: Update status ────────────────────────────────────────────────
+	// ── Step 12: Update status ────────────────────────────────────────────────
 	r.setCondition(&appDep, platformv1alpha1.ConditionWorkloadCreated,
 		metav1.ConditionTrue, "Created", "All workload resources are present")
 	r.setCondition(&appDep, platformv1alpha1.ConditionReady,
@@ -185,9 +155,6 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	appDep.Status.ObservedGeneration = appDep.Generation
 
 	if err := r.Status().Update(ctx, &appDep); err != nil {
-		// Status update failures are common when the object was just modified.
-		// We log and requeue rather than returning an error that would
-		// cause exponential backoff.
 		logger.Error(err, "Failed to update status")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -196,21 +163,68 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
-// handleDeletion processes the finalizer and performs cleanup.
-// Called when DeletionTimestamp is set on the AppDeployment.
+// reconcileOIDCSecret creates/updates the <appName>-oidc Kubernetes secret
+// using dynamic URL resolution from platformConfig to handle restarts.
+func (r *AppDeploymentReconciler) reconcileOIDCSecret(
+	ctx context.Context,
+	appDep *platformv1alpha1.AppDeployment,
+	cfg *platformConfig,
+	clientSecret string,
+) error {
+	secretName := fmt.Sprintf("%s-oidc", appDep.Spec.AppName)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: appDep.Namespace,
+		},
+	}
+
+	issuerURL := cfg.KeycloakOIDCURL
+	if issuerURL == "" {
+		issuerURL = cfg.KeycloakURL
+	}
+	if cfg.KeycloakRealm != "" && !strings.Contains(issuerURL, "/realms/") {
+		issuerURL = fmt.Sprintf("%s/realms/%s", strings.TrimSuffix(issuerURL, "/"), cfg.KeycloakRealm)
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		if secret.Data == nil {
+			secret.Data = make(map[string][]byte)
+		}
+
+		secret.Data["issuer-url"] = []byte(issuerURL)
+		secret.Data["client-id"] = []byte(appDep.Spec.AppName)
+
+		if clientSecret != "" {
+			secret.Data["client-secret"] = []byte(clientSecret)
+		}
+
+		if len(secret.Data["cookie-secret"]) != 32 {
+			randomCookieSecret := make([]byte, 16)
+			if _, err := rand.Read(randomCookieSecret); err != nil {
+				hash := sha256.Sum256([]byte(appDep.Spec.AppName + "-cookie-seed"))
+				secret.Data["cookie-secret"] = hash[:32]
+			} else {
+				encoded := hex.EncodeToString(randomCookieSecret)
+				secret.Data["cookie-secret"] = []byte(encoded)
+			}
+		}
+
+		return controllerutil.SetControllerReference(appDep, secret, r.Scheme)
+	})
+
+	return err
+}
+
 func (r *AppDeploymentReconciler) handleDeletion(ctx context.Context, appDep *platformv1alpha1.AppDeployment) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	if !controllerutil.ContainsFinalizer(appDep, finalizerName) {
-		// Finalizer already removed, nothing to do
 		return ctrl.Result{}, nil
 	}
 
 	logger.Info("Running cleanup for deleted AppDeployment", "app", appDep.Spec.AppName)
 
-	// Clean up the Keycloak client if OIDC was enabled.
-	// If this fails, we log the error but still remove the finalizer —
-	// we don't want a Keycloak outage to permanently block CR deletion.
 	if appDep.Spec.OIDC.Enabled {
 		cfg, err := r.getPlatformConfig(ctx, appDep.Namespace)
 		if err != nil {
@@ -224,8 +238,6 @@ func (r *AppDeploymentReconciler) handleDeletion(ctx context.Context, appDep *pl
 		}
 	}
 
-	// Remove the finalizer — Kubernetes can now garbage-collect the CR
-	// and all owned resources (StatefulSet, Services, etc.) via owner references.
 	controllerutil.RemoveFinalizer(appDep, finalizerName)
 	if err := r.Update(ctx, appDep); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
@@ -234,8 +246,6 @@ func (r *AppDeploymentReconciler) handleDeletion(ctx context.Context, appDep *pl
 	return ctrl.Result{}, nil
 }
 
-// getPlatformConfig reads the helmsman-platform-config Secret from the
-// given namespace and returns its values as a structured config.
 func (r *AppDeploymentReconciler) getPlatformConfig(ctx context.Context, namespace string) (*platformConfig, error) {
 	var secret corev1.Secret
 	key := types.NamespacedName{Name: platformConfigSecretName, Namespace: namespace}
@@ -263,8 +273,6 @@ func (r *AppDeploymentReconciler) getPlatformConfig(ctx context.Context, namespa
 	return cfg, nil
 }
 
-// setCondition updates or appends a condition in the AppDeployment's status.
-// Uses metav1.Condition which includes LastTransitionTime and ObservedGeneration.
 func (r *AppDeploymentReconciler) setCondition(
 	appDep *platformv1alpha1.AppDeployment,
 	condType string,
@@ -283,7 +291,6 @@ func (r *AppDeploymentReconciler) setCondition(
 			return
 		}
 	}
-	// Condition not found — append new one
 	appDep.Status.Conditions = append(appDep.Status.Conditions, metav1.Condition{
 		Type:               condType,
 		Status:             status,
@@ -294,10 +301,6 @@ func (r *AppDeploymentReconciler) setCondition(
 	})
 }
 
-// ensureExternalSecret creates or updates an ExternalSecret that tells ESO
-// to sync OIDC credentials from Vault into a Kubernetes Secret.
-// We use the unstructured client because the ESO CRD types aren't
-// imported as a Go dependency — this keeps our dependency tree small.
 func (r *AppDeploymentReconciler) ensureExternalSecret(ctx context.Context, appDep *platformv1alpha1.AppDeployment) error {
 	gvk := schema.GroupVersionKind{
 		Group:   "external-secrets.io",
@@ -314,7 +317,6 @@ func (r *AppDeploymentReconciler) ensureExternalSecret(ctx context.Context, appD
 		"app.kubernetes.io/name":       appDep.Spec.AppName,
 	})
 
-	// Set owner reference so the ExternalSecret is deleted when the CR is deleted
 	if err := controllerutil.SetControllerReference(appDep, desired, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set owner reference on ExternalSecret: %w", err)
 	}
@@ -374,21 +376,17 @@ func (r *AppDeploymentReconciler) ensureExternalSecret(ctx context.Context, appD
 		return err
 	}
 
-	// Update spec if it exists
 	existing.Object["spec"] = desired.Object["spec"]
 	return r.Update(ctx, existing)
 }
 
-// SetupWithManager registers the controller with the manager and declares
-// which resource types trigger reconciliation.
 func (r *AppDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1alpha1.AppDeployment{}).
-		// Watch owned resources — if someone deletes a Service the operator
-		// created, the controller is notified and recreates it (self-healing).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&corev1.Secret{}).
 		Complete(r)
 }

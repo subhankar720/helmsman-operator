@@ -171,7 +171,7 @@ func registerKeycloakClient(ctx context.Context, appName string, cfg *platformCo
 	return &OIDCCredentials{
 		ClientID:     appName,
 		ClientSecret: secretResp.Value,
-		IssuerURL:    fmt.Sprintf("%s/realms/%s", cfg.KeycloakOIDCURL, cfg.KeycloakRealm),
+		IssuerURL:    fmt.Sprintf("%s/realms/%s", cfg.KeycloakURL, cfg.KeycloakRealm),
 	}, nil
 }
 
