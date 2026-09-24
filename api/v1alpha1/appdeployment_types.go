@@ -88,7 +88,7 @@ type OIDCSpec struct {
 
 // AppDeploymentStatus defines the observed state of AppDeployment.
 type AppDeploymentStatus struct {
-	// Conditions represent the latest available observations of the AppDeployment's state.
+	// Conditions represent the latest available observations of the AppDeployment state.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -98,6 +98,23 @@ type AppDeploymentStatus struct {
 	// Populated by the operator after successful Keycloak registration.
 	// +optional
 	OIDCClientID string `json:"oidcClientId,omitempty"`
+
+	// Namespace is the Kubernetes namespace the application was deployed into.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Cluster is the name of the cluster sourced from helmsman-platform-config.
+	// +optional
+	Cluster string `json:"cluster,omitempty"`
+
+	// Endpoint is the internal service endpoint for this application.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Phase is a human-readable summary: Pending, Deploying, Ready, Failed.
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
 
 	// ReadyReplicas is the number of pods in the Ready state.
 	// +optional

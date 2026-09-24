@@ -47,6 +47,7 @@ type platformConfig struct {
 	KeycloakRealm     string
 	VaultURL          string
 	VaultToken        string
+	ClusterName       string // name of this cluster (for status enrichment)
 }
 
 //+kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -141,6 +142,12 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.ensureServices(ctx, &appDep); err != nil {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
+
+	// ── Step 10.5: Enrich status with deployment details ────────────────────
+	appDep.Status.Namespace = appDep.Namespace
+	appDep.Status.Cluster = cfg.ClusterName
+	appDep.Status.Endpoint = fmt.Sprintf("http://%s.%s.svc.cluster.local", appDep.Spec.AppName, appDep.Namespace)
+	appDep.Status.Phase = "Ready"
 
 	// ── Step 10: Ensure StatefulSet ───────────────────────────────────────────
 	if err := r.ensureStatefulSet(ctx, &appDep); err != nil {
@@ -263,6 +270,7 @@ func (r *AppDeploymentReconciler) getPlatformConfig(ctx context.Context, namespa
 		KeycloakRealm:     get("keycloak-realm"),
 		VaultURL:          get("vault-url"),
 		VaultToken:        get("vault-token"),
+		ClusterName:       get("cluster-name"),
 	}
 
 	if cfg.KeycloakURL == "" || cfg.VaultURL == "" {
