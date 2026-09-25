@@ -207,9 +207,12 @@ spec:
           status:
             description: AppDeploymentStatus defines the observed state of AppDeployment.
             properties:
+              cluster:
+                description: Cluster is the name of the cluster sourced from helmsman-platform-config.
+                type: string
               conditions:
                 description: Conditions represent the latest available observations
-                  of the AppDeployment's state.
+                  of the AppDeployment state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -268,6 +271,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              endpoint:
+                description: Endpoint is the internal service endpoint for this application.
+                type: string
+              namespace:
+                description: Namespace is the Kubernetes namespace the application
+                  was deployed into.
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the most recent generation observed
                   by the controller.
@@ -277,6 +287,10 @@ spec:
                 description: |-
                   OIDCClientID is the Keycloak client ID registered for this application.
                   Populated by the operator after successful Keycloak registration.
+                type: string
+              phase:
+                description: 'Phase is a human-readable summary: Pending, Deploying,
+                  Ready, Failed.'
                 type: string
               readyReplicas:
                 description: ReadyReplicas is the number of pods in the Ready state.
