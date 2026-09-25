@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the {{ .ProjectName }} itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- access_accessgrant_admin_role.yaml
+- access_accessgrant_editor_role.yaml
+- access_accessgrant_viewer_role.yaml
 - appdeployment_admin_role.yaml
 - appdeployment_editor_role.yaml
 - appdeployment_viewer_role.yaml

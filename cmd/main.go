@@ -37,8 +37,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	accessv1alpha1 "github.com/subhankar720/helmsman-operator/api/access/v1alpha1"
 	platformv1alpha1 "github.com/subhankar720/helmsman-operator/api/v1alpha1"
 	"github.com/subhankar720/helmsman-operator/internal/controller"
+	accesscontroller "github.com/subhankar720/helmsman-operator/internal/controller/access"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -51,6 +53,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(accessv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -207,6 +210,13 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AppDeployment")
+		os.Exit(1)
+	}
+	if err = (&accesscontroller.AccessGrantReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AccessGrant")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

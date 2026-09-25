@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/platform.helmsman.dev_appdeployments.yaml
+- bases/access.helmsman.dev_accessgrants.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

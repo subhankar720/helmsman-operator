@@ -10,6 +10,10 @@ SPOKE_CLUSTER_NAME="helmsman-onprem"
 HUB_CTX="kind-${HUB_CLUSTER_NAME}"
 SPOKE_CTX="kind-${SPOKE_CLUSTER_NAME}"
 
+ARGOCD_PASS_FILE="${ARGOCD_PASS_FILE:-$HOME/.helmsman-dev/argocd-admin-password}"
+if [ -z "${ARGOCD_PASS:-}" ] && [ -f "$ARGOCD_PASS_FILE" ]; then
+  ARGOCD_PASS="$(cat "$ARGOCD_PASS_FILE")"
+fi
 ARGOCD_PASS="${ARGOCD_PASS:-nyKTpDW-m4jQnODE}"
 ARGOCD_USER="admin"
 ARGOCD_NAMESPACE="argocd"
@@ -133,8 +137,10 @@ if $RESET_MODE; then
   ARGOCD_PASS=$(kubectl --context "$HUB_CTX" \
     get secret argocd-initial-admin-secret -n argocd \
     -o jsonpath="{.data.password}" | base64 -d)
-  echo "$ARGOCD_PASS" > /tmp/helmsman-argocd-pass
-  log_ok "Argo CD installed. Admin password saved to /tmp/helmsman-argocd-pass"
+  mkdir -p "$(dirname "$ARGOCD_PASS_FILE")"
+  echo -n "$ARGOCD_PASS" > "$ARGOCD_PASS_FILE"
+  chmod 600 "$ARGOCD_PASS_FILE"
+  log_ok "Argo CD installed. Admin password saved to $ARGOCD_PASS_FILE"
   kubectl --context "$HUB_CTX" delete secret argocd-initial-admin-secret -n argocd
 
   kubectl --context "$HUB_CTX" rollout restart deployment/argocd-repo-server -n argocd
@@ -162,10 +168,10 @@ if $RESET_MODE; then
   ARGOCD_PF_PID=$!
   sleep 8
   
-  if [ -f /tmp/helmsman-argocd-pass ]; then
-    ARGOCD_PASS=$(cat /tmp/helmsman-argocd-pass)
+  if [ -f "$ARGOCD_PASS_FILE" ]; then
+    ARGOCD_PASS=$(cat "$ARGOCD_PASS_FILE")
   fi
-  
+
   for attempt in 1 2 3; do
     if argocd login "localhost:${ARGOCD_PF_PORT}" \
         --username "$ARGOCD_USER" \
@@ -524,8 +530,8 @@ for i in {1..30}; do
 done
 
 if $CRD_READY; then
-  kubectl --context "$SPOKE_CTX" apply -f - <<EOF > /dev/null 2>&1
-apiVersion: external-secrets.io/v1
+  kubectl --context "$SPOKE_CTX" apply -f - <<EOF > /dev/null 2>&1 || log_warn "ClusterSecretStore apply failed"
+apiVersion: external-secrets.io/v1beta1
 kind: ClusterSecretStore
 metadata:
   name: vault-backend
@@ -563,8 +569,8 @@ done
 # =============================================================================
 log_step "Stage 9: Argo CD CLI Login"
 
-if [ -f /tmp/helmsman-argocd-pass ]; then
-  ARGOCD_PASS=$(cat /tmp/helmsman-argocd-pass)
+if [ -f "$ARGOCD_PASS_FILE" ]; then
+  ARGOCD_PASS=$(cat "$ARGOCD_PASS_FILE")
 fi
 
 kill_port_process "${ARGOCD_PF_PORT}"
@@ -577,17 +583,25 @@ ARGOCD_PF_PID=$!
 sleep 3
 
 LOGIN_OK=false
+LOGIN_ERR=""
 for attempt in 1 2 3 4 5; do
-  if argocd login "localhost:${ARGOCD_PF_PORT}" \
+  if LOGIN_ERR=$(argocd login "localhost:${ARGOCD_PF_PORT}" \
       --username "$ARGOCD_USER" \
       --password "$ARGOCD_PASS" \
-      --insecure > /dev/null 2>&1; then
+      --insecure 2>&1 > /dev/null); then
     log_ok "Argo CD CLI logged in via port-forward :${ARGOCD_PF_PORT}"
     LOGIN_OK=true
     break
   fi
+  log_warn "Login attempt $attempt failed: ${LOGIN_ERR}"
   sleep 3
 done
+
+if ! $LOGIN_OK; then
+  log_error "Argo CD CLI login failed after 5 attempts. If the password file is stale, reset it:"
+  log_error "  argocd account bcrypt --password '<new-pass>' | xargs -I{} kubectl --context $HUB_CTX -n argocd patch secret argocd-secret -p '{\"stringData\":{\"admin.password\":\"{}\"}}'"
+  log_error "  echo -n '<new-pass>' > $ARGOCD_PASS_FILE && kubectl --context $HUB_CTX -n argocd rollout restart deployment/argocd-server"
+fi
 
 # =============================================================================
 # Stage 10: Sync platform and application ArgoCD apps
@@ -613,7 +627,7 @@ if $LOGIN_OK; then
   if ! kubectl --context "$SPOKE_CTX" get clustersecretstore vault-backend >/dev/null 2>&1; then
     log_info "Re-applying ClusterSecretStore vault-backend post ESO sync..."
     kubectl --context "$SPOKE_CTX" apply -f - <<EOF > /dev/null 2>&1 || true
-apiVersion: external-secrets.io/v1
+apiVersion: external-secrets.io/v1beta1
 kind: ClusterSecretStore
 metadata:
   name: vault-backend
