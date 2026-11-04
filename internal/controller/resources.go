@@ -265,7 +265,7 @@ func (r *AppDeploymentReconciler) ensureStatefulSet(ctx context.Context, appDep 
 	}
 
 	// Fluent Bit sidecar is always present
-	containers = append(containers, buildFluentBitContainer(appDep))
+	containers = append(containers, buildFluentBitContainer())
 
 	// Build volume list
 	volumes := []corev1.Volume{
@@ -496,7 +496,7 @@ func buildADCContainer(appDep *platformv1alpha1.AppDeployment) corev1.Container 
 }
 
 // buildFluentBitContainer constructs the Fluent Bit log-shipping sidecar.
-func buildFluentBitContainer(appDep *platformv1alpha1.AppDeployment) corev1.Container {
+func buildFluentBitContainer() corev1.Container {
 	falseVal := false
 	return corev1.Container{
 		Name:  "fluent-bit",

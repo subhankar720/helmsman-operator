@@ -2,21 +2,14 @@ package controller
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,17 +43,17 @@ type platformConfig struct {
 	ClusterName       string // name of this cluster (for status enrichment)
 }
 
-//+kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments/finalizers,verbs=update
-//+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=external-secrets.io,resources=externalsecrets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=platform.helmsman.dev,resources=appdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=external-secrets.io,resources=externalsecrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 
 func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -170,59 +163,6 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
-// reconcileOIDCSecret creates/updates the <appName>-oidc Kubernetes secret
-// using dynamic URL resolution from platformConfig to handle restarts.
-func (r *AppDeploymentReconciler) reconcileOIDCSecret(
-	ctx context.Context,
-	appDep *platformv1alpha1.AppDeployment,
-	cfg *platformConfig,
-	clientSecret string,
-) error {
-	secretName := fmt.Sprintf("%s-oidc", appDep.Spec.AppName)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: appDep.Namespace,
-		},
-	}
-
-	issuerURL := cfg.KeycloakOIDCURL
-	if issuerURL == "" {
-		issuerURL = cfg.KeycloakURL
-	}
-	if cfg.KeycloakRealm != "" && !strings.Contains(issuerURL, "/realms/") {
-		issuerURL = fmt.Sprintf("%s/realms/%s", strings.TrimSuffix(issuerURL, "/"), cfg.KeycloakRealm)
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		if secret.Data == nil {
-			secret.Data = make(map[string][]byte)
-		}
-
-		secret.Data["issuer-url"] = []byte(issuerURL)
-		secret.Data["client-id"] = []byte(appDep.Spec.AppName)
-
-		if clientSecret != "" {
-			secret.Data["client-secret"] = []byte(clientSecret)
-		}
-
-		if len(secret.Data["cookie-secret"]) != 32 {
-			randomCookieSecret := make([]byte, 16)
-			if _, err := rand.Read(randomCookieSecret); err != nil {
-				hash := sha256.Sum256([]byte(appDep.Spec.AppName + "-cookie-seed"))
-				secret.Data["cookie-secret"] = hash[:32]
-			} else {
-				encoded := hex.EncodeToString(randomCookieSecret)
-				secret.Data["cookie-secret"] = []byte(encoded)
-			}
-		}
-
-		return controllerutil.SetControllerReference(appDep, secret, r.Scheme)
-	})
-
-	return err
-}
-
 func (r *AppDeploymentReconciler) handleDeletion(ctx context.Context, appDep *platformv1alpha1.AppDeployment) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -307,85 +247,6 @@ func (r *AppDeploymentReconciler) setCondition(
 		LastTransitionTime: now,
 		ObservedGeneration: appDep.Generation,
 	})
-}
-
-func (r *AppDeploymentReconciler) ensureExternalSecret(ctx context.Context, appDep *platformv1alpha1.AppDeployment) error {
-	gvk := schema.GroupVersionKind{
-		Group:   "external-secrets.io",
-		Version: "v1beta1",
-		Kind:    "ExternalSecret",
-	}
-
-	desired := &unstructured.Unstructured{}
-	desired.SetGroupVersionKind(gvk)
-	desired.SetName(appDep.Spec.AppName + "-oidc")
-	desired.SetNamespace(appDep.Namespace)
-	desired.SetLabels(map[string]string{
-		"app.kubernetes.io/managed-by": "helmsman-operator",
-		"app.kubernetes.io/name":       appDep.Spec.AppName,
-	})
-
-	if err := controllerutil.SetControllerReference(appDep, desired, r.Scheme); err != nil {
-		return fmt.Errorf("failed to set owner reference on ExternalSecret: %w", err)
-	}
-
-	spec := map[string]interface{}{
-		"refreshInterval": "1h",
-		"secretStoreRef": map[string]interface{}{
-			"name": "vault-backend",
-			"kind": "ClusterSecretStore",
-		},
-		"target": map[string]interface{}{
-			"name":           appDep.Spec.AppName + "-oidc",
-			"creationPolicy": "Owner",
-		},
-		"data": []interface{}{
-			map[string]interface{}{
-				"secretKey": "client-id",
-				"remoteRef": map[string]interface{}{
-					"key":      "apps/" + appDep.Spec.AppName + "/oidc",
-					"property": "client-id",
-				},
-			},
-			map[string]interface{}{
-				"secretKey": "client-secret",
-				"remoteRef": map[string]interface{}{
-					"key":      "apps/" + appDep.Spec.AppName + "/oidc",
-					"property": "client-secret",
-				},
-			},
-			map[string]interface{}{
-				"secretKey": "issuer-url",
-				"remoteRef": map[string]interface{}{
-					"key":      "apps/" + appDep.Spec.AppName + "/oidc",
-					"property": "issuer-url",
-				},
-			},
-			map[string]interface{}{
-				"secretKey": "cookie-secret",
-				"remoteRef": map[string]interface{}{
-					"key":      "apps/" + appDep.Spec.AppName + "/oidc",
-					"property": "cookie-secret",
-				},
-			},
-		},
-	}
-	if err := unstructured.SetNestedMap(desired.Object, spec, "spec"); err != nil {
-		return err
-	}
-
-	existing := &unstructured.Unstructured{}
-	existing.SetGroupVersionKind(gvk)
-	err := r.Get(ctx, types.NamespacedName{Name: desired.GetName(), Namespace: desired.GetNamespace()}, existing)
-
-	if errors.IsNotFound(err) {
-		return r.Create(ctx, desired)
-	} else if err != nil {
-		return err
-	}
-
-	existing.Object["spec"] = desired.Object["spec"]
-	return r.Update(ctx, existing)
 }
 
 func (r *AppDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {

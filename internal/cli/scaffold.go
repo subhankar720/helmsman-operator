@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -168,7 +169,7 @@ func openFleetRepoPR(f *scaffoldFlags, cr string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	repoURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", f.githubToken, f.fleetRepo)
 	if err := gitRun(tmpDir, "clone", "--depth=1", repoURL, "."); err != nil {
@@ -279,7 +280,7 @@ the CR to the spoke cluster and the Helmsman operator will:
 	if err != nil {
 		return "", fmt.Errorf("GitHub API request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func(b io.Closer) { _ = b.Close() }(resp.Body)
 
 	var result struct {
 		HTMLURL string `json:"html_url"`

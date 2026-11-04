@@ -16,7 +16,7 @@ import (
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
-func getKeycloakAdminToken(cfg *platformConfig) (string, error) {
+func getKeycloakAdminToken(ctx context.Context, cfg *platformConfig) (string, error) {
 	form := url.Values{
 		"username":   {cfg.KeycloakAdminUser},
 		"password":   {cfg.KeycloakAdminPass},
@@ -24,12 +24,16 @@ func getKeycloakAdminToken(cfg *platformConfig) (string, error) {
 		"client_id":  {"admin-cli"},
 	}
 	tokenURL := fmt.Sprintf("%s/realms/master/protocol/openid-connect/token", cfg.KeycloakURL)
-	resp, err := httpClient.Post(tokenURL, "application/x-www-form-urlencoded",
-		strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("failed to build Keycloak token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to call Keycloak token endpoint: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func(b io.Closer) { _ = b.Close() }(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("Keycloak token request failed (HTTP %d): %s", resp.StatusCode, body)
@@ -43,7 +47,7 @@ func getKeycloakAdminToken(cfg *platformConfig) (string, error) {
 	return result.AccessToken, nil
 }
 
-func keycloakRequest(method, url string, body interface{}, token string) (*http.Response, error) {
+func keycloakRequest(ctx context.Context, method, url string, body interface{}, token string) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -52,7 +56,7 @@ func keycloakRequest(method, url string, body interface{}, token string) (*http.
 		}
 		bodyReader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +99,7 @@ func decodeKeycloakClientList(data []byte) ([]keycloakClientListItem, error) {
 
 // registerKeycloakClient ensures the client exists and returns full credentials.
 func registerKeycloakClient(ctx context.Context, appName string, cfg *platformConfig) (*OIDCCredentials, error) {
-	token, err := getKeycloakAdminToken(cfg)
+	token, err := getKeycloakAdminToken(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get admin token: %w", err)
 	}
@@ -104,11 +108,11 @@ func registerKeycloakClient(ctx context.Context, appName string, cfg *platformCo
 
 	// Check if client already exists
 	listURL := fmt.Sprintf("%s/clients?clientId=%s", realmURL, appName)
-	resp, err := keycloakRequest("GET", listURL, nil, token)
+	resp, err := keycloakRequest(ctx, "GET", listURL, nil, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list clients: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func(b io.Closer) { _ = b.Close() }(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -136,11 +140,11 @@ func registerKeycloakClient(ctx context.Context, appName string, cfg *platformCo
 			"attributes":          map[string]string{"helmsman.managed": "true"},
 		}
 		createURL := fmt.Sprintf("%s/clients", realmURL)
-		resp, err = keycloakRequest("POST", createURL, clientDef, token)
+		resp, err = keycloakRequest(ctx, "POST", createURL, clientDef, token)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create client: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func(b io.Closer) { _ = b.Close() }(resp.Body)
 		if resp.StatusCode != http.StatusCreated {
 			body, _ := io.ReadAll(resp.Body)
 			return nil, fmt.Errorf("client creation failed (HTTP %d): %s", resp.StatusCode, body)
@@ -152,11 +156,11 @@ func registerKeycloakClient(ctx context.Context, appName string, cfg *platformCo
 
 	// Get client secret from Keycloak
 	secretURL := fmt.Sprintf("%s/clients/%s/client-secret", realmURL, internalID)
-	resp2, err := keycloakRequest("GET", secretURL, nil, token)
+	resp2, err := keycloakRequest(ctx, "GET", secretURL, nil, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get client secret: %w", err)
 	}
-	defer resp2.Body.Close()
+	defer func(b io.Closer) { _ = b.Close() }(resp2.Body)
 	if resp2.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp2.Body)
 		return nil, fmt.Errorf("client secret fetch failed (HTTP %d): %s", resp2.StatusCode, body)
@@ -182,11 +186,11 @@ func writeOIDCCredsToVault(ctx context.Context, appName string, creds *OIDCCrede
 
 	// Check if path already exists to preserve cookie-secret
 	existingCookieSecret := ""
-	req, _ := http.NewRequest("GET", vaultPath, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, vaultPath, nil)
 	req.Header.Set("X-Vault-Token", cfg.VaultToken)
 	resp, err := httpClient.Do(req)
 	if err == nil && resp.StatusCode == http.StatusOK {
-		defer resp.Body.Close()
+		defer func(b io.Closer) { _ = b.Close() }(resp.Body)
 		var existing struct {
 			Data struct {
 				Data map[string]string `json:"data"`
@@ -218,7 +222,7 @@ func writeOIDCCredsToVault(ctx context.Context, appName string, creds *OIDCCrede
 		},
 	}
 	body, _ := json.Marshal(payload)
-	writeReq, _ := http.NewRequest("POST", vaultPath, bytes.NewReader(body))
+	writeReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, vaultPath, bytes.NewReader(body))
 	writeReq.Header.Set("X-Vault-Token", cfg.VaultToken)
 	writeReq.Header.Set("Content-Type", "application/json")
 
@@ -226,7 +230,7 @@ func writeOIDCCredsToVault(ctx context.Context, appName string, creds *OIDCCrede
 	if err != nil {
 		return fmt.Errorf("failed to write to Vault: %w", err)
 	}
-	defer writeResp.Body.Close()
+	defer func(b io.Closer) { _ = b.Close() }(writeResp.Body)
 	if writeResp.StatusCode != http.StatusOK && writeResp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(writeResp.Body)
 		return fmt.Errorf("Vault write failed (HTTP %d): %s", writeResp.StatusCode, b)
@@ -236,17 +240,17 @@ func writeOIDCCredsToVault(ctx context.Context, appName string, creds *OIDCCrede
 
 // deleteKeycloakClient removes the Keycloak client during finalizer processing.
 func deleteKeycloakClient(ctx context.Context, appName string, cfg *platformConfig) error {
-	token, err := getKeycloakAdminToken(cfg)
+	token, err := getKeycloakAdminToken(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to get admin token: %w", err)
 	}
 	realmURL := fmt.Sprintf("%s/admin/realms/%s", cfg.KeycloakURL, cfg.KeycloakRealm)
 	listURL := fmt.Sprintf("%s/clients?clientId=%s", realmURL, appName)
-	resp, err := keycloakRequest("GET", listURL, nil, token)
+	resp, err := keycloakRequest(ctx, "GET", listURL, nil, token)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func(b io.Closer) { _ = b.Close() }(resp.Body)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -259,11 +263,11 @@ func deleteKeycloakClient(ctx context.Context, appName string, cfg *platformConf
 		return nil
 	}
 	deleteURL := fmt.Sprintf("%s/clients/%s", realmURL, clients[0].ID)
-	resp2, err := keycloakRequest("DELETE", deleteURL, nil, token)
+	resp2, err := keycloakRequest(ctx, "DELETE", deleteURL, nil, token)
 	if err != nil {
 		return err
 	}
-	defer resp2.Body.Close()
+	defer func(b io.Closer) { _ = b.Close() }(resp2.Body)
 	if resp2.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp2.Body)
 		return fmt.Errorf("client deletion failed (HTTP %d): %s", resp2.StatusCode, body)
