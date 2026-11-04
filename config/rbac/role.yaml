@@ -125,6 +125,16 @@ rules:
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io
+  resourceNames:
+  - helmsman-namespace-admin
+  - helmsman-namespace-operator
+  - helmsman-namespace-reader
+  resources:
+  - clusterroles
+  verbs:
+  - bind
+- apiGroups:
+  - rbac.authorization.k8s.io
   resources:
   - rolebindings
   verbs:

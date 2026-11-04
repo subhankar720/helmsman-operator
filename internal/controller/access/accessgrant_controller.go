@@ -42,6 +42,7 @@ type AccessGrantReconciler struct {
 //+kubebuilder:rbac:groups=access.helmsman.dev,resources=accessgrants/finalizers,verbs=update
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch
+//+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=bind,resourceNames=helmsman-namespace-reader;helmsman-namespace-operator;helmsman-namespace-admin
 
 func (r *AccessGrantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
