@@ -115,7 +115,6 @@ type AppDeploymentStatus struct {
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
-
 	// ReadyReplicas is the number of pods in the Ready state.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
