@@ -66,6 +66,15 @@ func (r *AccessGrantReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// ── Step 3.5: Skip reconciliation for terminal states ────────────────────
+	// Expired and Revoked are terminal — no further action should be taken.
+	// Without this check, a status update from expireGrant triggers another
+	// reconcile which falls through to step 7 and recreates the RoleBinding.
+	if ag.Status.State == accessv1alpha1.StateExpired ||
+		ag.Status.State == accessv1alpha1.StateRevoked {
+		return ctrl.Result{}, nil
+	}
+
 	// ── Step 4: Policy validation ─────────────────────────────────────────
 	// Parse TTL, enforce environment limits
 	ttl, err := time.ParseDuration(ag.Spec.TTL)
