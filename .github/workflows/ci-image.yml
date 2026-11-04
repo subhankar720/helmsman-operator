@@ -1,0 +1,182 @@
+name: CI Image
+
+# Verifies generated files, runs lint and tests, then (main only) builds,
+# scans, signs and publishes the operator image and bumps the fleet repo.
+#
+# PUBLISHING IS OFF until the repo variable IMAGE_PUBLISH_ENABLED is "true"
+# (Settings -> Secrets and variables -> Actions -> Variables). While it is
+# unset, the image and fleet-bump jobs are skipped. The image job needs the
+# secrets GHCR_TOKEN, COSIGN_PRIVATE_KEY and COSIGN_PASSWORD; fleet-bump
+# needs FLEET_REPO_TOKEN.
+#
+# KNOWN WEAKNESS: the image is pushed to GHCR *before* the Trivy gate runs,
+# because Trivy scans the pushed digest. If the scan fails, that digest
+# stays in the registry, unsigned, and the fleet repo is not bumped.
+# Consumers must only deploy signed digests (verify with cosign).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "api/**"
+      - "internal/**"
+      - "cmd/**"
+      - "config/**"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/subhankar720/helmsman-operator
+
+jobs:
+  generated-up-to-date:
+    name: Generated files are up to date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Regenerate CRDs, RBAC and deepcopy code
+        run: make manifests generate
+
+      - name: Check for drift
+        run: |
+          if ! git diff --exit-code -- api config; then
+            echo "::error::Generated files in api/ or config/ are out of date."
+            echo "Run 'make manifests generate' and commit the result."
+            echo "RBAC rules in config/rbac/role.yaml come from //+kubebuilder:rbac"
+            echo "markers in the Go code, not hand edits: change the marker instead."
+            exit 1
+          fi
+
+  lint:
+    # Pull requests already run lint.yml through its own trigger.
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/lint.yml
+
+  test:
+    # Pull requests already run test.yml through its own trigger.
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/test.yml
+
+  image:
+    name: Build, scan, sign and push image
+    if: github.event_name != 'pull_request' && vars.IMAGE_PUBLISH_ENABLED == 'true'
+    needs: [generated-up-to-date, lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan of the pushed digest (HIGH, CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.repository_owner }}
+          TRIVY_PASSWORD: ${{ secrets.GHCR_TOKEN }}
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign the manifest-list digest
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST}"
+
+  fleet-bump:
+    name: Pin the operator in helmsman-fleet
+    needs: [image]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: fleet-bump
+      cancel-in-progress: false
+    env:
+      APP_FILE: platform/helmsman-operator/argocd-application.yaml
+    steps:
+      - name: Check out helmsman-fleet
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: subhankar720/helmsman-fleet
+          token: ${{ secrets.FLEET_REPO_TOKEN }}
+          path: fleet
+
+      - name: Update targetRevision and kustomize.images
+        working-directory: fleet
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          if [ ! -f "$APP_FILE" ]; then
+            echo "::error::$APP_FILE not found in helmsman-fleet; cannot pin the operator."
+            exit 1
+          fi
+          export IMAGE_PIN="controller=${IMAGE}:${SHA}"
+          yq -i '.spec.source.targetRevision = strenv(SHA) |
+                 .spec.source.kustomize.images[0] = strenv(IMAGE_PIN)' "$APP_FILE"
+          git diff -- "$APP_FILE"
+
+      - name: Commit and push if changed
+        working-directory: fleet
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          if git diff --quiet -- "$APP_FILE"; then
+            echo "Already pinned to ${SHA}; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$APP_FILE"
+          git commit -m "chore: bump helmsman-operator to ${SHA}"
+          for attempt in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          echo "::error::Could not push the fleet bump after 3 attempts."
+          exit 1
