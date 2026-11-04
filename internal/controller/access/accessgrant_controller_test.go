@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -33,52 +34,102 @@ import (
 var _ = Describe("AccessGrant Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
+		const rbName = "helmsman-ag-" + resourceName
 
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
-		accessgrant := &accessv1alpha1.AccessGrant{}
+		rbKey := types.NamespacedName{Name: rbName, Namespace: "default"}
+
+		var controllerReconciler *AccessGrantReconciler
+
+		reconcileOnce := func() {
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+		}
 
 		BeforeEach(func() {
+			controllerReconciler = &AccessGrantReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
 			By("creating the custom resource for the Kind AccessGrant")
-			err := k8sClient.Get(ctx, typeNamespacedName, accessgrant)
+			err := k8sClient.Get(ctx, typeNamespacedName, &accessv1alpha1.AccessGrant{})
 			if err != nil && errors.IsNotFound(err) {
 				resource := &accessv1alpha1.AccessGrant{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					// A valid spec: every field the CRD marks as required.
+					Spec: accessv1alpha1.AccessGrantSpec{
+						Subject:     "user:test@example.com",
+						Cluster:     "helmsman-onprem",
+						Namespace:   "default",
+						Permission:  accessv1alpha1.PermissionReadOnly,
+						TTL:         "1h",
+						Environment: "dev",
+						Reason:      "envtest",
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &accessv1alpha1.AccessGrant{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
 
 			By("Cleanup the specific resource instance AccessGrant")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			// Let the controller run its finalizer so the object is really gone.
+			reconcileOnce()
+			Eventually(func() bool {
+				return errors.IsNotFound(k8sClient.Get(ctx, typeNamespacedName, &accessv1alpha1.AccessGrant{}))
+			}).Should(BeTrue())
+			_ = k8sClient.Delete(ctx, &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: rbName, Namespace: "default"}})
 		})
+
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &AccessGrantReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+			reconcileOnce()
+		})
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+		It("should activate the grant and create a RoleBinding to the reader role", func() {
+			reconcileOnce() // adds the finalizer
+			reconcileOnce() // validates policy, creates the RoleBinding, sets Active
+
+			ag := &accessv1alpha1.AccessGrant{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, ag)).To(Succeed())
+			Expect(ag.Status.State).To(Equal(accessv1alpha1.StateActive))
+			Expect(ag.Status.RoleBindingRef).To(Equal(rbName))
+			Expect(ag.Status.ExpiresAt).NotTo(BeNil())
+
+			rb := &rbacv1.RoleBinding{}
+			Expect(k8sClient.Get(ctx, rbKey, rb)).To(Succeed())
+			Expect(rb.RoleRef.Name).To(Equal(roleReader))
+			Expect(rb.Subjects).To(HaveLen(1))
+			Expect(rb.Subjects[0].Kind).To(Equal("User"))
+			Expect(rb.Subjects[0].Name).To(Equal("test@example.com"))
+		})
+
+		It("should not recreate the RoleBinding once the grant is Expired", func() {
+			reconcileOnce() // adds the finalizer
+
+			ag := &accessv1alpha1.AccessGrant{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, ag)).To(Succeed())
+			ag.Status.State = accessv1alpha1.StateExpired
+			Expect(k8sClient.Status().Update(ctx, ag)).To(Succeed())
+
+			reconcileOnce()
+
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, rbKey, &rbacv1.RoleBinding{}))).To(BeTrue())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, ag)).To(Succeed())
+			Expect(ag.Status.State).To(Equal(accessv1alpha1.StateExpired))
 		})
 	})
 })

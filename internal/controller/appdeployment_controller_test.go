@@ -51,7 +51,16 @@ var _ = Describe("AppDeployment Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					// Minimal spec that satisfies the CRD's required fields.
+					// OIDC stays disabled so no Keycloak/Vault calls are made.
+					Spec: platformv1alpha1.AppDeploymentSpec{
+						AppName: "test-app",
+						Image: platformv1alpha1.ImageSpec{
+							Repository: "example.com/test-app",
+							Tag:        "v0.0.1",
+						},
+						Container: platformv1alpha1.ContainerSpec{Port: 8080},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
