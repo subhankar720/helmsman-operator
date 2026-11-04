@@ -1,0 +1,13 @@
+# JSON 6902 patch on the manager Deployment (container 0 is "manager").
+# - The base image is "controller:latest". The images transformer keeps an
+#   existing tag when only newName is given, and patches run before it, so
+#   the tag is dropped here first; the images entry then renames it with no
+#   tag, and an Argo CD kustomize.images override still matches "controller".
+# - "add" on an object member creates or replaces it, so this works whether
+#   or not the base defines imagePullPolicy.
+- op: replace
+  path: /spec/template/spec/containers/0/image
+  value: controller
+- op: add
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: IfNotPresent

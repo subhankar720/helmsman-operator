@@ -1,0 +1,18 @@
+# Cloud overlay: the image published by .github/workflows/ci-image.yml.
+# No tag or digest here. The consumer (the Argo CD Application in
+# helmsman-fleet) supplies it via spec.source.kustomize.images, e.g.
+#   controller=ghcr.io/subhankar720/helmsman-operator:<commit SHA>
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../default
+patches:
+# Targeted by kind: the base namePrefix renames the Deployment.
+- path: deployment_patch.yaml
+  target:
+    group: apps
+    version: v1
+    kind: Deployment
+images:
+- name: controller
+  newName: ghcr.io/subhankar720/helmsman-operator

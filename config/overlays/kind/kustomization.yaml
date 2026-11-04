@@ -1,0 +1,12 @@
+# Kind overlay: the locally built image loaded with `kind load docker-image`.
+# Nothing else changes. The base sets no imagePullPolicy; dev-up-gemini.sh
+# patches it to Never after applying, because helmsman-operator:dev only
+# exists in the kind nodes' image store.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../default
+images:
+- name: controller
+  newName: helmsman-operator
+  newTag: dev
