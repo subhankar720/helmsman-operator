@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -309,28 +310,36 @@ func permissionToClusterRole(p accessv1alpha1.Permission) string {
 }
 
 // subjectFromSpec parses the subject string into an RBAC Subject.
-// Supports: user:<email> and serviceaccount:<namespace>/<name>
+//
+//	user:<name>                       -> User <name>
+//	<name>                            -> User <name> (bare string)
+//	serviceaccount:<namespace>/<name> -> ServiceAccount <name> in <namespace>
+//
+// A serviceaccount: subject without both a namespace and a name, or a
+// user: subject with an empty name, falls back to a User named by the raw
+// input, so a malformed subject never silently binds a different identity.
 func subjectFromSpec(subject string) rbacv1.Subject {
-	if len(subject) > 16 && subject[:16] == "serviceaccount:" {
-		rest := subject[16:]
-		parts := splitN(rest, "/", 2)
-		if len(parts) == 2 {
+	if rest, ok := strings.CutPrefix(subject, "serviceaccount:"); ok {
+		if ns, name, found := strings.Cut(rest, "/"); found && ns != "" && name != "" {
 			return rbacv1.Subject{
-				Kind:      "ServiceAccount",
-				Name:      parts[1],
-				Namespace: parts[0],
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      name,
+				Namespace: ns,
 			}
 		}
+		return userSubject(subject)
 	}
-	// Default: treat as user
-	name := subject
-	if len(subject) > 5 && subject[:5] == "user:" {
-		name = subject[5:]
+	if name, ok := strings.CutPrefix(subject, "user:"); ok && name != "" {
+		return userSubject(name)
 	}
+	return userSubject(subject)
+}
+
+func userSubject(name string) rbacv1.Subject {
 	return rbacv1.Subject{
-		Kind:     "User",
+		Kind:     rbacv1.UserKind,
 		Name:     name,
-		APIGroup: "rbac.authorization.k8s.io",
+		APIGroup: rbacv1.GroupName,
 	}
 }
 
@@ -347,30 +356,6 @@ func sanitizeLabel(s string) string {
 		}
 	}
 	return string(result)
-}
-
-// splitN splits s by sep at most n times.
-func splitN(s, sep string, n int) []string {
-	var result []string
-	for n > 1 {
-		idx := indexOf(s, sep)
-		if idx < 0 {
-			break
-		}
-		result = append(result, s[:idx])
-		s = s[idx+len(sep):]
-		n--
-	}
-	return append(result, s)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 // SetupWithManager registers the controller with the manager.
