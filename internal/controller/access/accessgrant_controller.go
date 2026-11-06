@@ -2,6 +2,8 @@ package access
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -343,19 +345,47 @@ func userSubject(name string) rbacv1.Subject {
 	}
 }
 
-// sanitizeLabel replaces characters invalid in label values with dashes.
+// maxLabelValueLen is the Kubernetes limit for a label value.
+const maxLabelValueLen = 63
+
+// sanitizeLabel turns a subject into a valid label value: characters other than
+// letters, digits, '-', '_' and '.' become '-', leading and trailing
+// non-alphanumerics are trimmed, and a value longer than 63 characters keeps its
+// readable start plus '-' and 8 hex characters of the subject's SHA-256, so two
+// long subjects with the same start still get different labels.
 func sanitizeLabel(s string) string {
 	result := make([]byte, len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-			(c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' {
+		if isAlphanumeric(c) || c == '-' || c == '.' || c == '_' {
 			result[i] = c
 		} else {
 			result[i] = '-'
 		}
 	}
-	return string(result)
+	v := trimNonAlphanumeric(string(result))
+	if len(v) <= maxLabelValueLen {
+		return v
+	}
+	sum := sha256.Sum256([]byte(s))
+	suffix := hex.EncodeToString(sum[:4]) // 8 characters
+	prefix := trimNonAlphanumeric(v[:maxLabelValueLen-len(suffix)-1])
+	return prefix + "-" + suffix
+}
+
+func isAlphanumeric(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func trimNonAlphanumeric(s string) string {
+	start, end := 0, len(s)
+	for start < end && !isAlphanumeric(s[start]) {
+		start++
+	}
+	for end > start && !isAlphanumeric(s[end-1]) {
+		end--
+	}
+	return s[start:end]
 }
 
 // SetupWithManager registers the controller with the manager.
