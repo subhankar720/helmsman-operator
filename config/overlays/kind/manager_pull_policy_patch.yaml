@@ -1,0 +1,13 @@
+# Strategic-merge patch keyed by container name: sets the field whether or not
+# the base defines it, and does not depend on the container's list position.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        imagePullPolicy: Never
