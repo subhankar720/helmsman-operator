@@ -2,15 +2,20 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -25,10 +30,26 @@ const finalizerName = "platform.helmsman.dev/finalizer"
 // platformConfigSecretName is the Secret the operator reads for Keycloak/Vault URLs.
 const platformConfigSecretName = "helmsman-platform-config"
 
+// defaultOperatorNamespace is where the operator runs on the platform clusters.
+const defaultOperatorNamespace = "helmsman-operator-system"
+
+// conditionCleanup reports the state of deletion cleanup (Keycloak, Vault).
+const conditionCleanup = "Cleanup"
+
+// errPlatformConfigNotFound means helmsman-platform-config exists in neither
+// the AppDeployment's namespace nor the operator's namespace.
+var errPlatformConfigNotFound = errors.New("platform config not found")
+
 // AppDeploymentReconciler reconciles AppDeployment objects.
 type AppDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Recorder emits Kubernetes Events on the AppDeployment (nil-safe).
+	Recorder record.EventRecorder
+	// OperatorNamespace is the fallback location of helmsman-platform-config.
+	// Empty means: OPERATOR_NAMESPACE, then the pod's service-account
+	// namespace, then helmsman-operator-system.
+	OperatorNamespace string
 }
 
 // platformConfig holds the values read from helmsman-platform-config Secret.
@@ -53,6 +74,8 @@ type platformConfig struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=external-secrets.io,resources=externalsecrets,verbs=get;create
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -80,7 +103,10 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// ── Step 4: Read platform configuration ──────────────────────────────────
-	cfg, err := r.getPlatformConfig(ctx, appDep.Namespace)
+	cfg, cfgSource, err := r.getPlatformConfig(ctx, appDep.Namespace)
+	if err == nil && cfgSource != appDep.Namespace {
+		logger.V(1).Info("Using platform config from the operator namespace", "namespace", cfgSource)
+	}
 	if err != nil {
 		logger.Error(err, "Failed to read platform config")
 		r.setCondition(&appDep, platformv1alpha1.ConditionReady,
@@ -113,6 +139,15 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			metav1.ConditionTrue, "Registered", "Keycloak client registered and credentials written to Vault")
 		appDep.Status.OIDCClientID = creds.ClientID
 		logger.Info("Keycloak client registered and Vault written", "clientID", creds.ClientID)
+
+		// The <app>-oidc Secret the adc sidecar reads, via an ExternalSecret.
+		skipped, err := r.ensureOIDCExternalSecret(ctx, &appDep)
+		if err != nil {
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, err
+		}
+		if skipped != "" {
+			logger.Info("Not creating the OIDC ExternalSecret", "reason", skipped)
+		}
 	}
 
 	// ── Step 6: Ensure ServiceAccount ─────────────────────────────────────────
@@ -162,6 +197,18 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
+// handleDeletion removes what the operator created outside the cluster:
+// first the Keycloak client, then the Vault credentials. In-cluster objects
+// (StatefulSet, Services, ExternalSecret, …) carry ownerReferences and are
+// garbage-collected. The finalizer is released only when every step succeeded
+// or found nothing to delete. Any other failure keeps the finalizer, records a
+// Warning Event and a Cleanup=False condition, and returns the error so the
+// request is retried with exponential backoff.
+//
+// One deliberate exception: if helmsman-platform-config exists neither in the
+// AppDeployment's namespace nor in the operator's namespace, cleanup is
+// impossible, so the finalizer is released after a Warning Event that names
+// exactly what is left behind; otherwise namespace deletion could hang forever.
 func (r *AppDeploymentReconciler) handleDeletion(ctx context.Context, appDep *platformv1alpha1.AppDeployment) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -170,17 +217,32 @@ func (r *AppDeploymentReconciler) handleDeletion(ctx context.Context, appDep *pl
 	}
 
 	logger.Info("Running cleanup for deleted AppDeployment", "app", appDep.Spec.AppName)
+	app := appDep.Spec.AppName
 
 	if appDep.Spec.OIDC.Enabled {
-		cfg, err := r.getPlatformConfig(ctx, appDep.Namespace)
-		if err != nil {
-			logger.Error(err, "Could not read platform config during cleanup — skipping Keycloak deletion")
-		} else {
-			if err := deleteKeycloakClient(ctx, appDep.Spec.AppName, cfg); err != nil {
-				logger.Error(err, "Failed to delete Keycloak client — continuing with finalizer removal")
-			} else {
-				logger.Info("Keycloak client deleted", "clientID", appDep.Spec.AppName)
+		cfg, cfgSource, err := r.getPlatformConfig(ctx, appDep.Namespace)
+		switch {
+		case errors.Is(err, errPlatformConfigNotFound):
+			msg := fmt.Sprintf("%s not found in namespace %s or %s: cannot clean up; Keycloak client %q (realm unknown) and Vault path secret/apps/%s/oidc are left behind and must be removed by hand",
+				platformConfigSecretName, appDep.Namespace, r.operatorNamespace(), app, app)
+			logger.Error(err, "Cleanup impossible, releasing the finalizer", "leaks", msg)
+			r.event(appDep, corev1.EventTypeWarning, "CleanupSkipped", msg)
+		case err != nil:
+			return r.cleanupFailed(ctx, appDep, "PlatformConfigUnreadable", err)
+		default:
+			if cfgSource != appDep.Namespace {
+				logger.Info("Cleanup uses platform config from the operator namespace", "namespace", cfgSource)
 			}
+			if err := deleteKeycloakClient(ctx, app, cfg); err != nil {
+				return r.cleanupFailed(ctx, appDep, "KeycloakDeleteFailed", err)
+			}
+			logger.Info("Keycloak client deleted (or already absent)", "clientID", app)
+			if err := deleteOIDCCredsFromVault(ctx, app, cfg); err != nil {
+				return r.cleanupFailed(ctx, appDep, "VaultDeleteFailed", err)
+			}
+			logger.Info("Vault credentials deleted (or already absent)", "path", "secret/apps/"+app+"/oidc")
+			r.event(appDep, corev1.EventTypeNormal, "CleanupSucceeded",
+				fmt.Sprintf("Keycloak client %q and Vault path secret/apps/%s/oidc removed (config from namespace %s)", app, app, cfgSource))
 		}
 	}
 
@@ -188,36 +250,78 @@ func (r *AppDeploymentReconciler) handleDeletion(ctx context.Context, appDep *pl
 	if err := r.Update(ctx, appDep); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
 	}
-
 	return ctrl.Result{}, nil
 }
 
-func (r *AppDeploymentReconciler) getPlatformConfig(ctx context.Context, namespace string) (*platformConfig, error) {
-	var secret corev1.Secret
-	key := types.NamespacedName{Name: platformConfigSecretName, Namespace: namespace}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		return nil, fmt.Errorf("secret %s/%s not found: %w", namespace, platformConfigSecretName, err)
+// cleanupFailed keeps the finalizer: it records the failure on the object and
+// returns the error so controller-runtime retries with exponential backoff.
+func (r *AppDeploymentReconciler) cleanupFailed(ctx context.Context, appDep *platformv1alpha1.AppDeployment, reason string, cause error) (ctrl.Result, error) {
+	msg := fmt.Sprintf("cleanup step failed, finalizer kept, will retry: %v", cause)
+	r.event(appDep, corev1.EventTypeWarning, reason, msg)
+	r.setCondition(appDep, conditionCleanup, metav1.ConditionFalse, reason, msg)
+	if err := r.Status().Update(ctx, appDep); err != nil {
+		log.FromContext(ctx).V(1).Info("Could not record the cleanup condition", "error", err.Error())
 	}
+	return ctrl.Result{}, fmt.Errorf("%s: %w", reason, cause)
+}
 
-	get := func(k string) string { return string(secret.Data[k]) }
-
-	cfg := &platformConfig{
-		KeycloakURL:       get("keycloak-url"),
-		KeycloakOIDCURL:   get("keycloak-oidc-url"),
-		KeycloakAdminUser: get("keycloak-admin-user"),
-		KeycloakAdminPass: get("keycloak-admin-password"),
-		KeycloakRealm:     get("keycloak-realm"),
-		VaultURL:          get("vault-url"),
-		VaultToken:        get("vault-token"),
-		ClusterName:       get("cluster-name"),
+// event records a Kubernetes Event when a recorder is configured.
+func (r *AppDeploymentReconciler) event(obj runtime.Object, eventType, reason, msg string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, eventType, reason, msg)
 	}
+}
 
-	if cfg.KeycloakURL == "" || cfg.VaultURL == "" {
-		cfg.KeycloakOIDCURL = cfg.KeycloakURL
-		return nil, fmt.Errorf("platform config Secret is missing required fields")
+// operatorNamespace returns the fallback namespace for helmsman-platform-config.
+func (r *AppDeploymentReconciler) operatorNamespace() string {
+	if r.OperatorNamespace != "" {
+		return r.OperatorNamespace
 	}
+	if ns := os.Getenv("OPERATOR_NAMESPACE"); ns != "" {
+		return ns
+	}
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(b)); ns != "" {
+			return ns
+		}
+	}
+	return defaultOperatorNamespace
+}
 
-	return cfg, nil
+// getPlatformConfig reads helmsman-platform-config from the AppDeployment's
+// namespace first and, if it is not there, from the operator's namespace. It
+// returns the namespace it used. errPlatformConfigNotFound means neither has it.
+func (r *AppDeploymentReconciler) getPlatformConfig(ctx context.Context, namespace string) (*platformConfig, string, error) {
+	candidates := []string{namespace}
+	if opNS := r.operatorNamespace(); opNS != namespace {
+		candidates = append(candidates, opNS)
+	}
+	for _, ns := range candidates {
+		var secret corev1.Secret
+		err := r.Get(ctx, types.NamespacedName{Name: platformConfigSecretName, Namespace: ns}, &secret)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("secret %s/%s unreadable: %w", ns, platformConfigSecretName, err)
+		}
+		get := func(k string) string { return string(secret.Data[k]) }
+		cfg := &platformConfig{
+			KeycloakURL:       get("keycloak-url"),
+			KeycloakOIDCURL:   get("keycloak-oidc-url"),
+			KeycloakAdminUser: get("keycloak-admin-user"),
+			KeycloakAdminPass: get("keycloak-admin-password"),
+			KeycloakRealm:     get("keycloak-realm"),
+			VaultURL:          get("vault-url"),
+			VaultToken:        get("vault-token"),
+			ClusterName:       get("cluster-name"),
+		}
+		if cfg.KeycloakURL == "" || cfg.VaultURL == "" {
+			return nil, "", fmt.Errorf("secret %s/%s is missing required fields (keycloak-url, vault-url)", ns, platformConfigSecretName)
+		}
+		return cfg, ns, nil
+	}
+	return nil, "", fmt.Errorf("%w: secret %s in namespaces %v", errPlatformConfigNotFound, platformConfigSecretName, candidates)
 }
 
 func (r *AppDeploymentReconciler) setCondition(

@@ -19,12 +19,21 @@ import (
 	platformv1alpha1 "github.com/subhankar720/helmsman-operator/api/v1alpha1"
 )
 
+// managedByValue is the app.kubernetes.io/managed-by value on everything the
+// operator creates. The platform's Kyverno policy require-helmsman-labels
+// (Enforce, namespaces labelled helmsman.dev/managed=true) admits pods only
+// with managed-by=helmsman, so any other value gets the StatefulSet rejected.
+// Ownership is expressed by the controller ownerReference, not by this label.
+const managedByValue = "helmsman"
+
 // commonLabels returns the standard label set applied to all resources
-// created by the operator for this AppDeployment.
+// created by the operator for this AppDeployment. Selectors never use these
+// labels except app.kubernetes.io/name, so changing a value here does not
+// touch any (immutable) selector.
 func commonLabels(appDep *platformv1alpha1.AppDeployment) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       appDep.Spec.AppName,
-		"app.kubernetes.io/managed-by": "helmsman-operator",
+		"app.kubernetes.io/managed-by": managedByValue,
 		"helmsman.dev/owning-team":     appDep.Spec.OwningTeam,
 	}
 }

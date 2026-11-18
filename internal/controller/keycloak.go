@@ -245,7 +245,7 @@ func deleteKeycloakClient(ctx context.Context, appName string, cfg *platformConf
 		return fmt.Errorf("failed to get admin token: %w", err)
 	}
 	realmURL := fmt.Sprintf("%s/admin/realms/%s", cfg.KeycloakURL, cfg.KeycloakRealm)
-	listURL := fmt.Sprintf("%s/clients?clientId=%s", realmURL, appName)
+	listURL := fmt.Sprintf("%s/clients?clientId=%s", realmURL, url.QueryEscape(appName))
 	resp, err := keycloakRequest(ctx, "GET", listURL, nil, token)
 	if err != nil {
 		return err
@@ -255,12 +255,17 @@ func deleteKeycloakClient(ctx context.Context, appName string, cfg *platformConf
 	if err != nil {
 		return err
 	}
+	// An error answer (401, 403, 5xx) must not be read as "no client" or as a
+	// client to delete: only a 200 list is trusted.
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("client lookup failed (HTTP %d)", resp.StatusCode)
+	}
 	clients, err := decodeKeycloakClientList(body)
 	if err != nil {
 		return err
 	}
-	if len(clients) == 0 {
-		return nil
+	if len(clients) == 0 || clients[0].ID == "" {
+		return nil // not found counts as deleted
 	}
 	deleteURL := fmt.Sprintf("%s/clients/%s", realmURL, clients[0].ID)
 	resp2, err := keycloakRequest(ctx, "DELETE", deleteURL, nil, token)
@@ -268,9 +273,34 @@ func deleteKeycloakClient(ctx context.Context, appName string, cfg *platformConf
 		return err
 	}
 	defer func(b io.Closer) { _ = b.Close() }(resp2.Body)
-	if resp2.StatusCode != http.StatusNoContent {
+	switch resp2.StatusCode {
+	case http.StatusNoContent, http.StatusNotFound: // 404: removed in the meantime
+		return nil
+	default:
 		body, _ := io.ReadAll(resp2.Body)
 		return fmt.Errorf("client deletion failed (HTTP %d): %s", resp2.StatusCode, body)
 	}
-	return nil
+}
+
+// deleteOIDCCredsFromVault removes secret/apps/<app>/oidc completely: the KV v2
+// metadata endpoint deletes every version and the metadata. Idempotent: a path
+// that does not exist (404, or 204 from Vault) counts as success.
+func deleteOIDCCredsFromVault(ctx context.Context, appName string, cfg *platformConfig) error {
+	metaURL := fmt.Sprintf("%s/v1/secret/metadata/apps/%s/oidc", cfg.VaultURL, url.PathEscape(appName))
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, metaURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to build Vault delete request: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", cfg.VaultToken)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to call Vault: %w", err)
+	}
+	defer func(b io.Closer) { _ = b.Close() }(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK, http.StatusNotFound:
+		return nil
+	default:
+		return fmt.Errorf("Vault delete of secret/apps/%s/oidc failed (HTTP %d)", appName, resp.StatusCode)
+	}
 }
