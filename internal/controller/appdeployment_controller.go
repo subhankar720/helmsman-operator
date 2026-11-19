@@ -156,7 +156,7 @@ func (r *AppDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// ── Step 7: Ensure NetworkPolicies ────────────────────────────────────────
-	if err := r.ensureNetworkPolicies(ctx, &appDep); err != nil {
+	if err := r.ensureNetworkPolicies(ctx, &appDep, cfg); err != nil {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 

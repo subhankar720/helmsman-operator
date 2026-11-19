@@ -203,6 +203,11 @@ var _ = Describe("AppDeployment lifecycle (WO-1.1c)", func() {
 			Expect(o.GetLabels()).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "helmsman"), names[i])
 			Expect(o.GetLabels()).To(HaveKeyWithValue("app.kubernetes.io/name", app), names[i])
 		}
+		kcNP := &networkingv1.NetworkPolicy{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: app + "-allow-keycloak-egress"}, kcNP)).To(Succeed())
+		Expect(kcNP.Spec.Egress[0].Ports[0].Port.IntVal).To(Equal(keycloakEgressPort(&platformConfig{KeycloakURL: fake.srv.URL})))
+		Expect(kcNP.Spec.Egress[0].Ports[0].Port.IntVal).NotTo(Equal(int32(80)), "fake Keycloak listens on a random port, not 80")
+
 		sts := &appsv1.StatefulSet{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: app}, sts)).To(Succeed())
 		Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "helmsman"))

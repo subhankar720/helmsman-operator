@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -64,7 +66,7 @@ func (r *AppDeploymentReconciler) ensureServiceAccount(ctx context.Context, appD
 // - default-deny: blocks all ingress and egress
 // - allow-ingress: opens the traffic port (4180 if OIDC, app port otherwise)
 // - allow-dns: opens UDP/TCP port 53 for DNS resolution
-func (r *AppDeploymentReconciler) ensureNetworkPolicies(ctx context.Context, appDep *platformv1alpha1.AppDeployment) error {
+func (r *AppDeploymentReconciler) ensureNetworkPolicies(ctx context.Context, appDep *platformv1alpha1.AppDeployment, cfg *platformConfig) error {
 	labels := commonLabels(appDep)
 	selector := metav1.LabelSelector{
 		MatchLabels: map[string]string{
@@ -138,8 +140,10 @@ func (r *AppDeploymentReconciler) ensureNetworkPolicies(ctx context.Context, app
 		},
 	}
 
-	// Policy 4: Allow egress to Keycloak (port 80)
-	keycloakPort := intstr.FromInt32(80)
+	// Policy 4: Allow egress to Keycloak on the port the app's issuer URL uses
+	// (the adc sidecar calls it for discovery and logins). On kind that is the
+	// NodePort in keycloak-url (30081); a fixed 80 blocked every login.
+	keycloakPort := intstr.FromInt32(keycloakEgressPort(cfg))
 	allowKeycloakEgress := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      appDep.Spec.AppName + "-allow-keycloak-egress",
@@ -604,4 +608,27 @@ func (r *AppDeploymentReconciler) ensureFluentBitConfigMap(ctx context.Context, 
 		return err
 	}
 	return createOrSkip(ctx, r.Client, cm, &corev1.ConfigMap{})
+}
+
+// keycloakEgressPort is the TCP port of the configured Keycloak URL: the
+// explicit port, else 443 for https and 80 otherwise (also when the URL is
+// missing or unparsable).
+func keycloakEgressPort(cfg *platformConfig) int32 {
+	if cfg == nil {
+		return 80
+	}
+	u, err := url.Parse(cfg.KeycloakURL)
+	if err != nil {
+		return 80
+	}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.ParseInt(p, 10, 32); err == nil && n > 0 && n < 65536 {
+			return int32(n)
+		}
+		return 80
+	}
+	if u.Scheme == "https" {
+		return 443
+	}
+	return 80
 }
