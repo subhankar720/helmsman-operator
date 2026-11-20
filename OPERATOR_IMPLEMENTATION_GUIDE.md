@@ -424,7 +424,7 @@ kubectl wait --for=condition=Ready node --all --context $CONTEXT --timeout=120s
 helm install vault hashicorp/vault \
   --namespace vault --create-namespace \
   --set "server.dev.enabled=true" \
-  --set "server.dev.rootToken=root" \
+  --set "server.dev.rootToken=<vault-dev-root-token>" \
   --set "server.service.type=NodePort" \
   --set "server.service.nodePorts.http=30082" \
   --context $CONTEXT
@@ -432,7 +432,7 @@ helm install vault hashicorp/vault \
 # Install Keycloak
 helm install keycloak bitnami/keycloak \
   --namespace keycloak --create-namespace \
-  --set auth.adminPassword=helmsman123 \
+  --set auth.adminPassword=<keycloak-admin-password> \
   --set httpPort=8081 \
   --set service.type=NodePort \
   --set service.nodePorts.http=8081 \
@@ -489,7 +489,7 @@ kubectl create secret generic helmsman-platform-config \
   --from-literal=keycloak-oidc-url=http://keycloak-headless.keycloak:8080 \
   --from-literal=keycloak-realm=helmsman \
   --from-literal=keycloak-admin-user=admin \
-  --from-literal=keycloak-admin-password=helmsman123 \
+  --from-literal=keycloak-admin-password=<keycloak-admin-password> \
   --from-literal=vault-url=http://vault.vault:8200 \
   --from-literal=vault-token=root \
   --context $CONTEXT
@@ -515,9 +515,9 @@ stringData:
   keycloak-oidc-url: http://keycloak-headless.keycloak:8080  # Pods use this for OIDC
   keycloak-realm: helmsman
   keycloak-admin-user: admin
-  keycloak-admin-password: helmsman123
+  keycloak-admin-password: <keycloak-admin-password>
   vault-url: http://vault.vault:8200
-  vault-token: root
+  vault-token: <vault-dev-root-token>
 ```
 
 ### 6.2 Secret Flow Diagram

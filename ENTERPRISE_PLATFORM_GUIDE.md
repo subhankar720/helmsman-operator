@@ -769,7 +769,7 @@ helm upgrade external-secrets external-secrets/external-secrets \
 # 2. Upgrade Keycloak
 helm upgrade keycloak bitnami/keycloak \
   -n keycloak \
-  --set auth.adminPassword=helmsman123
+  --set auth.adminPassword=<keycloak-admin-password>
 
 # 3. Upgrade Operator
 # Update code, build image, load to kind, rollout restart
