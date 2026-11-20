@@ -1,0 +1,44 @@
+# gitleaks ignore list for helmsman-operator (WO-1.5a, reviewed 20 Nov 2026).
+# One fingerprint per finding (commit:file:rule:line). Each entry was classified without printing
+# its value; evidence: _workspace/outcomes/WO-1.5a-evidence/E4a-gitleaks-baseline-classification.txt.
+# Add an entry only after the same review; never by broad pattern.
+
+# --- False positives: the value is base64 of an http:// service URL (keycloak-url / keycloak-oidc-url
+# --- in Secret examples in the runbooks), not a credential.
+# keycloak-oidc-url, commit caa3605 (2026-08-30)
+caa3605e078ec465813bb628e08ca6ac6ece26fa:INCIDENT_RUNBOOK.md:generic-api-key:209
+# keycloak-url, commit ab60aef (2026-08-26)
+ab60aeff9229b1398a32da6f54a9d94e4fd88ca0:INCIDENT_RUNBOOK.md:generic-api-key:907
+# keycloak-oidc-url, commit ab60aef (2026-08-26)
+ab60aeff9229b1398a32da6f54a9d94e4fd88ca0:INCIDENT_RUNBOOK.md:generic-api-key:908
+# keycloak-oidc-url, commit ab60aef (2026-08-26)
+ab60aeff9229b1398a32da6f54a9d94e4fd88ca0:INCIDENT_RUNBOOK.md:generic-api-key:1386
+# keycloak-url, commit ab60aef (2026-08-26)
+ab60aeff9229b1398a32da6f54a9d94e4fd88ca0:HOMELAB_OPERATIONS_GUIDE.md:generic-api-key:616
+# keycloak-oidc-url, commit ab60aef (2026-08-26)
+ab60aeff9229b1398a32da6f54a9d94e4fd88ca0:HOMELAB_OPERATIONS_GUIDE.md:generic-api-key:617
+# keycloak-oidc-url, commit ab60aef (2026-08-26)
+ab60aeff9229b1398a32da6f54a9d94e4fd88ca0:HOMELAB_OPERATIONS_GUIDE.md:generic-api-key:893
+# keycloak-url, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:132
+# keycloak-url, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:470
+# keycloak-url, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:532
+# keycloak-url, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:751
+
+# --- Known true positives, accepted: sample-app OIDC client-secret (32 chars) and cookie-secret (44 chars)
+# --- committed 23 Aug in INCIDENT_RUNBOOK.md (removed from the tree in caa3605). Not live on 20 Nov
+# --- (WO-1.5a E1a) and the live values were rotated again (E1b). Decision of 6 Nov: no history rewrite.
+# --- (Line 446 holds both values; its fingerprint covers both findings.)
+# client-secret, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:104
+# cookie-secret, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:105
+# client-secret, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:165
+# cookie-secret, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:172
+# client-secret, commit 6945896 (2026-08-23)
+694589676fbc4bbaed55a7d83f313e2e7926b43c:INCIDENT_RUNBOOK.md:generic-api-key:446

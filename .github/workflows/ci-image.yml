@@ -70,10 +70,15 @@ jobs:
     if: github.event_name != 'pull_request'
     uses: ./.github/workflows/test.yml
 
+  secret-scan:
+    # Pull requests already run secret-scan.yml through its own trigger.
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/secret-scan.yml
+
   image:
     name: Build, scan, sign and push image
     if: github.event_name != 'pull_request' && vars.IMAGE_PUBLISH_ENABLED == 'true'
-    needs: [generated-up-to-date, lint, test]
+    needs: [generated-up-to-date, lint, test, secret-scan]
     runs-on: ubuntu-latest
     permissions:
       contents: read
